@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,12 +29,22 @@ import com.sun.tools.attach.AgentLoadException;
 import com.sun.tools.attach.AttachNotSupportedException;
 import com.sun.tools.attach.spi.AttachProvider;
 
+import jdk.internal.misc.VM;
+
 import java.io.InputStream;
 import java.io.IOException;
 import java.io.File;
+import java.net.SocketAddress;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.WritableByteChannel;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.Files;
+import java.util.Map;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -48,7 +58,17 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
     // will not be able to find all Hotspot processes.
     // Any changes to this needs to be synchronized with HotSpot.
     private static final String tmpdir = "/tmp";
+
+    private static final long ROOT_UID = 0L;
+    private static final int S_IRGRP = 0040;
+    private static final int S_IWGRP = 0020;
+    private static final int S_IROTH = 0004;
+    private static final int S_IWOTH = 002;
+
     String socket_path;
+
+    private final SocketAddress socket_address;
+
     /**
      * Attaches to the target VM
      */
@@ -116,14 +136,12 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         // bogus process
         checkPermissions(socket_path);
 
+        socket_address = UnixDomainSocketAddress.of(socket_path);
         // Check that we can connect to the process
         // - this ensures we throw the permission denied error now rather than
         // later when we attempt to enqueue a command.
-        int s = socket();
-        try {
-            connect(s, socket_path);
-        } finally {
-            close(s);
+        try (SocketChannel s = SocketChannel.open(StandardProtocolFamily.UNIX)) {
+            s.connect(socket_address);
         }
     }
 
@@ -158,13 +176,12 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         }
 
         // create UNIX socket
-        int s = socket();
-
+        SocketChannel s = SocketChannel.open(StandardProtocolFamily.UNIX);
         // connect to target VM
         try {
-            connect(s, socket_path);
+            s.connect(socket_address);
         } catch (IOException x) {
-            close(s);
+            s.close();
             throw x;
         }
 
@@ -189,7 +206,7 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
 
 
         // Create an input stream to read reply
-        SocketInputStream sis = new SocketInputStream(s);
+        InputStream sis = Channels.newInputStream(s);
 
         // Read the command completion status
         int completionStatus;
@@ -234,46 +251,6 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         return sis;
     }
 
-    /*
-     * InputStream for the socket connection to get target VM
-     */
-    private static class SocketInputStream extends InputStream {
-        int s = -1;
-
-        public SocketInputStream(int s) {
-            this.s = s;
-        }
-
-        public synchronized int read() throws IOException {
-            byte b[] = new byte[1];
-            int n = this.read(b, 0, 1);
-            if (n == 1) {
-                return b[0] & 0xff;
-            } else {
-                return -1;
-            }
-        }
-
-        public synchronized int read(byte[] bs, int off, int len) throws IOException {
-            if ((off < 0) || (off > bs.length) || (len < 0) ||
-                ((off + len) > bs.length) || ((off + len) < 0)) {
-                throw new IndexOutOfBoundsException();
-            } else if (len == 0) {
-                return 0;
-            }
-
-            return VirtualMachineImpl.read(s, bs, off, len);
-        }
-
-        public synchronized void close() throws IOException {
-            if (s != -1) {
-                int toClose = s;
-                s = -1;
-                VirtualMachineImpl.close(toClose);
-            }
-        }
-    }
-
     // Return the socket file for the given process.
     private File findSocketFile(int pid, int ns_pid) {
         // A process may not exist in the same mount namespace as the caller.
@@ -314,14 +291,11 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
      * Write/sends the given to the target VM. String is transmitted in
      * UTF-8 encoding.
      */
-    private void writeString(int fd, String s) throws IOException {
-        if (s.length() > 0) {
-            byte[] b = s.getBytes(UTF_8);
-            VirtualMachineImpl.write(fd, b, 0, b.length);
+    private void writeString(WritableByteChannel channel, String s) throws IOException {
+        if (!s.isEmpty()) {
+            channel.write(ByteBuffer.wrap(s.getBytes(UTF_8)));
         }
-        byte b[] = new byte[1];
-        b[0] = 0;
-        write(fd, b, 0, 1);
+        channel.write(ByteBuffer.wrap(new byte[]{0x00}));
     }
 
 
@@ -358,22 +332,31 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         }
     }
 
+    private static void checkPermissions(String pathSpec) throws IOException {
+        Path path = Path.of(pathSpec);
+        long processUid = VM.geteuid();
+        long processGid = VM.getegid();
+        Map<String, Object> attributes = Files.readAttributes(path, "unix:uid,gid,mode");
+        int fileUid = (int) attributes.get("uid");
+        int fileGid = (int) attributes.get("gid");
+        int mode = (int) attributes.get("mode");
+        if (fileUid != processUid && processUid != ROOT_UID) {
+            throwFileNotSecure(pathSpec, "file should be owned by the current user (which is " + processUid + ") but is owned by " + fileUid);
+        } else if (fileGid != processGid && processUid != ROOT_UID) {
+            throwFileNotSecure(pathSpec, "file's group should be the current group (which is " + processGid + ") but the group is " + fileGid);
+        } else if ((mode & (S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH)) != 0) {
+            throwFileNotSecure(pathSpec, "file should only be readable and writable by the owner but has " + String.format("0%03o", mode & 0777) + " access");
+        }
+    }
+
+    private static void throwFileNotSecure(String pathSpec, String message) throws IOException {
+        throw new IOException("well-known file " + pathSpec + " is not secure: " + message);
+    }
 
     //-- native methods
 
+    // ProcessHandle.of(pid).orElseThrow(() -> new IOException("kill")).destroy();
     static native void sendQuitTo(int pid) throws IOException;
-
-    static native void checkPermissions(String path) throws IOException;
-
-    static native int socket() throws IOException;
-
-    static native void connect(int fd, String path) throws IOException;
-
-    static native void close(int fd) throws IOException;
-
-    static native int read(int fd, byte buf[], int off, int bufLen) throws IOException;
-
-    static native void write(int fd, byte buf[], int off, int bufLen) throws IOException;
 
     static {
         System.loadLibrary("attach");
