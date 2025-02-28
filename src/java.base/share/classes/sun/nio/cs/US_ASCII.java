@@ -129,7 +129,7 @@ public class US_ASCII
         }
     }
 
-    private static class Encoder extends CharsetEncoder {
+    private static class Encoder extends CharsetEncoder implements ArrayEncoder {
 
         private Encoder(Charset cs) {
             super(cs, 1.0f, 1.0f);
@@ -142,6 +142,25 @@ public class US_ASCII
         public boolean isLegalReplacement(byte[] repl) {
             return (repl.length == 1 && repl[0] >= 0) ||
                    super.isLegalReplacement(repl);
+        }
+
+        @Override
+        public boolean isASCIICompatible() {
+            return true;
+        }
+
+        @Override
+        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst,
+                        int dp) {
+            // TODO Auto-generated method stub
+            return ArrayEncoder.super.encodeFromLatin1(src, sp, len, dst, dp);
+        }
+
+        @Override
+        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst,
+                        int dp) {
+            // TODO Auto-generated method stub
+            return ArrayEncoder.super.encodeFromUTF16(src, sp, len, dst, dp);
         }
 
         private final Surrogate.Parser sgp = new Surrogate.Parser();

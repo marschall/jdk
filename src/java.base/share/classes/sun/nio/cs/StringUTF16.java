@@ -35,5 +35,10 @@ class StringUTF16 {
                               ARRAY_BYTE_BASE_OFFSET + ARRAY_BYTE_INDEX_SCALE * index * 2L);
     }
 
+    static void putChar(byte[] val, int index, char c) {
+        unsafe.putChar(val,
+                        ARRAY_BYTE_BASE_OFFSET + ARRAY_BYTE_INDEX_SCALE * index * 2L, c);
+    }
+
     private static final jdk.internal.misc.Unsafe unsafe = jdk.internal.misc.Unsafe.getUnsafe();
 }

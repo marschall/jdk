@@ -716,8 +716,8 @@ public class DoubleByte {
         }
 
         @Override
-        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst) {
-            int dp = 0;
+        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst, int di) {
+            int dp = di;
             int sl = sp + len;
             while (sp < sl) {
                 char c = (char)(src[sp++] & 0xff);
@@ -738,12 +738,12 @@ public class DoubleByte {
                 }
 
             }
-            return dp;
+            return dp - di;
         }
 
         @Override
-        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst) {
-            int dp = 0;
+        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst, int di) {
+            int dp = di;
             int sl = sp + len;
             while (sp < sl) {
                 char c = StringUTF16.getChar(src, sp++);
@@ -766,7 +766,7 @@ public class DoubleByte {
                     dst[dp++] = (byte)bb;
                 }
             }
-            return dp;
+            return dp - di;
         }
 
         @Override
@@ -1043,8 +1043,8 @@ public class DoubleByte {
         }
 
         @Override
-        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst) {
-            int dp = 0;
+        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst, int di) {
+            int dp = di;
             int sl = sp + len;
             while (sp < sl) {
                 char c = (char)(src[sp++] & 0xff);
@@ -1075,12 +1075,12 @@ public class DoubleByte {
                  currentState = SBCS;
                  dst[dp++] = SI;
             }
-            return dp;
+            return dp - di;
         }
 
         @Override
-        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst) {
-            int dp = 0;
+        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst, int di) {
+            int dp = di;
             int sl = sp + len;
             while (sp < sl) {
                 char c = StringUTF16.getChar(src, sp++);
@@ -1114,7 +1114,7 @@ public class DoubleByte {
                  currentState = SBCS;
                  dst[dp++] = SI;
             }
-            return dp;
+            return dp - di;
         }
     }
 

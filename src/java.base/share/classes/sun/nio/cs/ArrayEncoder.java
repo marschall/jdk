@@ -36,10 +36,18 @@ public interface ArrayEncoder {
     int encode(char[] src, int off, int len, byte[] dst);
 
     default int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst) {
+        return encodeFromLatin1(src, sp, len, dst, 0);
+    }
+
+    default int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst, int dp) {
         return -1;
     }
 
     default int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst) {
+        return encodeFromUTF16(src, sp, len, dst, 0);
+    }
+    
+    default int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst, int dp) {
         return -1;
     }
 

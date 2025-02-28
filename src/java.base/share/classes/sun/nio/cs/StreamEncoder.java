@@ -105,6 +105,72 @@ public final class StreamEncoder extends Writer {
     }
 
     public void write(int c) throws IOException {
+        if (encoder instanceof ArrayEncoder arrayEncoder && !haveLeftoverChar) {
+            int written = writeCharUsing(c, arrayEncoder);
+            if (written != -1) {
+                return;
+            }
+        }
+        writeAsArray(c);
+    }
+
+    private int writeCharUsing(int c, ArrayEncoder arrayEncoder) throws IOException {
+        if (c <= 255) {
+            byte[] buf = new byte[] {(byte) c};
+            synchronized (lock) {
+                ensureOpen();
+                if (c <= 127 && arrayEncoder.isASCIICompatible()) {
+                    return writeAsciiCharUsing(buf, arrayEncoder);
+                } else {
+                    return writeLatin1CharUsing(buf, arrayEncoder);
+                }
+            }
+        } else {
+            byte[] buf = new byte[2];
+            StringUTF16.putChar(buf, 0, (char) c);
+            return writeUtf16CharUsing(buf, arrayEncoder);
+        }
+    }
+
+    private int writeAsciiCharUsing(byte[] buf, ArrayEncoder arrayEncoder) throws IOException {
+        growByteBufferIfNeeded(1);
+        // ASCII compatible no encoding needed
+        if (bb.position() == 0) {
+            out.write(buf);
+        } else {
+            bb.put(buf);
+            if (bb.remaining() == 0) {
+                writeBytes();
+            }
+        }
+        return 1;
+    }
+
+    private int writeLatin1CharUsing(byte[] buf, ArrayEncoder arrayEncoder) throws IOException {
+        growByteBufferIfNeeded(1);
+        int written = arrayEncoder.encodeFromLatin1(buf, 0, 1, bb.array(), bb.arrayOffset() + bb.position());
+        if (written != -1) {
+            bb.position(bb.position() + written);
+            if (bb.remaining() == 0) {
+                writeBytes();
+            }
+        }
+        return written;
+    }
+
+    private int writeUtf16CharUsing(byte[] buf, ArrayEncoder arrayEncoder) throws IOException {
+        growByteBufferIfNeeded(1);
+        int written = arrayEncoder.encodeFromUTF16(buf, 0, 1, bb.array(), bb.arrayOffset() + bb.position());
+        if (written != -1) {
+            bb.position(bb.position() + written);
+            if (bb.remaining() == 0) {
+                writeBytes();
+            }
+        }
+        return written;
+    }
+
+    private void writeAsArray(int c) throws IOException {
         char[] cbuf = new char[1];
         cbuf[0] = (char) c;
         write(cbuf, 0, 1);
@@ -129,6 +195,7 @@ public final class StreamEncoder extends Writer {
             throw new IndexOutOfBoundsException();
         char[] cbuf = new char[len];
         str.getChars(off, off + len, cbuf, 0);
+//        CharBuffer cb = CharBuffer.warp(str, off, off + len);
         write(cbuf, 0, len);
     }
 

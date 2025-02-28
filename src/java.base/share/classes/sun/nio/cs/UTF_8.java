@@ -415,7 +415,7 @@ public final class UTF_8 extends Unicode {
         }
     }
 
-    private static final class Encoder extends CharsetEncoder {
+    private static final class Encoder extends CharsetEncoder implements ArrayEncoder {
 
         private Encoder(Charset cs) {
             super(cs, 1.1f, 3.0f);
@@ -428,6 +428,11 @@ public final class UTF_8 extends Unicode {
         public boolean isLegalReplacement(byte[] repl) {
             return ((repl.length == 1 && repl[0] >= 0) ||
                     super.isLegalReplacement(repl));
+        }
+
+        @Override
+        public boolean isASCIICompatible() {
+            return true;
         }
 
         private static CoderResult overflow(CharBuffer src, int sp,
@@ -564,6 +569,24 @@ public final class UTF_8 extends Unicode {
                 return encodeArrayLoop(src, dst);
             else
                 return encodeBufferLoop(src, dst);
+        }
+
+        @Override
+        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst, int dp) {
+            if (JLA.countPositives(dst, dp, len) == len) {
+                // src is ASCII
+                System.arraycopy(src, sp, dst, dp, len);
+                return len;
+            }
+            // needs access to
+            // java.lang.String#encodeUTF8_UTF16(byte[], boolean)
+            return -1;
+        }
+
+        @Override
+        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst, int dp) {
+            // needs access to java.lang.String#encodeUTF8_UTF16(byte[], boolean)
+            return -1;
         }
 
     }

@@ -388,8 +388,8 @@ public class HKSCS {
             return dp;
         }
 
-        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst) {
-            int dp = 0;
+        public int encodeFromUTF16(byte[] src, int sp, int len, byte[] dst, int di) {
+            int dp = di;
             int sl = sp + len;
             int dl = dst.length;
             while (sp < sl) {
@@ -413,7 +413,7 @@ public class HKSCS {
                     dst[dp++] = (byte)bb;
                 }
             }
-            return dp;
+            return dp - di;
         }
 
         static char[] C2B_UNMAPPABLE = new char[0x100];

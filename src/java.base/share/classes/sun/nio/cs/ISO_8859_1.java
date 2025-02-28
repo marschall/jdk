@@ -126,7 +126,7 @@ public class ISO_8859_1
         }
     }
 
-    private static class Encoder extends CharsetEncoder {
+    private static class Encoder extends CharsetEncoder implements ArrayEncoder {
 
         private Encoder(Charset cs) {
             super(cs, 1.0f, 1.0f);
@@ -141,6 +141,18 @@ public class ISO_8859_1
         }
 
         private final Surrogate.Parser sgp = new Surrogate.Parser();
+
+        @Override
+        public boolean isASCIICompatible() {
+            return true;
+        }
+
+        @Override
+        public int encodeFromLatin1(byte[] src, int sp, int len, byte[] dst, int dp) {
+            encodeFromLatin1Check(src, sp, len, dst, dp);
+            System.arraycopy(src, sp, dst, dp, len);
+            return len;
+        }
 
         // Method possible replaced with a compiler intrinsic.
         private static int encodeISOArray(char[] sa, int sp,
@@ -164,6 +176,16 @@ public class ISO_8859_1
                 da[dp++] = (byte)c;
             }
             return i;
+        }
+        
+        private static void encodeFromLatin1Check(byte[] src, int sp, int len, byte[] dst, int dp) {
+            Objects.requireNonNull(src);
+            Objects.requireNonNull(dst);
+            Preconditions.checkIndex(sp, src.length, Preconditions.AIOOBE_FORMATTER);
+            Preconditions.checkIndex(dp, dst.length, Preconditions.AIOOBE_FORMATTER);
+            
+            Preconditions.checkIndex(sp + len - 1, src.length, Preconditions.AIOOBE_FORMATTER);
+            Preconditions.checkIndex(dp + len - 1, dst.length, Preconditions.AIOOBE_FORMATTER);
         }
 
         private static void encodeISOArrayCheck(char[] sa, int sp,
