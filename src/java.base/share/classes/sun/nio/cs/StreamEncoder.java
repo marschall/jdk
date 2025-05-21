@@ -127,9 +127,8 @@ public final class StreamEncoder extends Writer {
         /* Check the len before creating a char buffer */
         if (len < 0)
             throw new IndexOutOfBoundsException();
-        char[] cbuf = new char[len];
-        str.getChars(off, off + len, cbuf, 0);
-        write(cbuf, 0, len);
+        CharBuffer cb = CharBuffer.wrap(str, off, off + len);
+        write(cb);
     }
 
     public void write(CharBuffer cb) throws IOException {
