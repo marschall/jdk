@@ -26,6 +26,8 @@
 package java.util;
 
 import java.io.*;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.random.RandomGenerator;
 import java.util.stream.DoubleStream;
@@ -33,8 +35,6 @@ import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 
 import static jdk.internal.util.random.RandomSupport.*;
-
-import jdk.internal.misc.Unsafe;
 
 /**
  * An instance of this class is used to generate a stream of
@@ -293,7 +293,16 @@ public class Random implements RandomGenerator, java.io.Serializable {
      * (The specs for the methods in this class describe the ongoing
      * computation of this value.)
      */
-    private final AtomicLong seed;
+    private long seed;
+
+    static final VarHandle SEED_HANDLE;
+    static {
+        try {
+            SEED_HANDLE = MethodHandles.lookup().findVarHandle(Random.class, "seed", long.class);
+        } catch (ReflectiveOperationException x) {
+            throw new ExceptionInInitializerError(x);
+        }
+    }
 
     private static final long multiplier = 0x5DEECE66DL;
     private static final long addend = 0xBL;
@@ -312,7 +321,7 @@ public class Random implements RandomGenerator, java.io.Serializable {
     }
 
     private Random(Void unused) {
-        this.seed = null;
+        SEED_HANDLE.setRelease(this, 0L);
     }
 
     private static long seedUniquifier() {
@@ -346,10 +355,10 @@ public class Random implements RandomGenerator, java.io.Serializable {
     @SuppressWarnings("this-escape")
     public Random(long seed) {
         if (getClass() == Random.class)
-            this.seed = new AtomicLong(initialScramble(seed));
+            SEED_HANDLE.setRelease(this, initialScramble(seed));
         else {
             // subclass might have overridden setSeed
-            this.seed = new AtomicLong();
+            SEED_HANDLE.setRelease(this, 0L);
             setSeed(seed);
         }
     }
@@ -395,7 +404,7 @@ public class Random implements RandomGenerator, java.io.Serializable {
      *         operation is not supported by this random number generator
      */
     public synchronized void setSeed(long seed) {
-        this.seed.set(initialScramble(seed));
+        SEED_HANDLE.setRelease(this, initialScramble(seed));
         haveNextNextGaussian = false;
     }
 
@@ -431,11 +440,10 @@ public class Random implements RandomGenerator, java.io.Serializable {
      */
     protected int next(int bits) {
         long oldseed, nextseed;
-        AtomicLong seed = this.seed;
         do {
-            oldseed = seed.get();
+            oldseed = (long) SEED_HANDLE.getAcquire(this);
             nextseed = (oldseed * multiplier + addend) & mask;
-        } while (!seed.compareAndSet(oldseed, nextseed));
+        } while ((long) SEED_HANDLE.compareAndExchangeRelease(this, oldseed, nextseed) != oldseed);
         return (int)(nextseed >>> (48 - bits));
     }
 
@@ -793,13 +801,11 @@ public class Random implements RandomGenerator, java.io.Serializable {
 
         ObjectInputStream.GetField fields = s.readFields();
 
-        // The seed is read in as {@code long} for
-        // historical reasons, but it is converted to an AtomicLong.
         long seedVal = fields.get("seed", -1L);
         if (seedVal < 0)
             throw new java.io.StreamCorruptedException(
                     "Random: invalid seed");
-        resetSeed(seedVal);
+        SEED_HANDLE.setRelease(this, seedVal);
         nextNextGaussian = fields.get("nextNextGaussian", 0.0);
         haveNextNextGaussian = fields.get("haveNextNextGaussian", false);
     }
@@ -818,26 +824,12 @@ public class Random implements RandomGenerator, java.io.Serializable {
         // set the values of the Serializable fields
         ObjectOutputStream.PutField fields = s.putFields();
 
-        // The seed is serialized as a long for historical reasons.
-        fields.put("seed", seed.get());
+        fields.put("seed", (long) SEED_HANDLE.getVolatile(this));
         fields.put("nextNextGaussian", nextNextGaussian);
         fields.put("haveNextNextGaussian", haveNextNextGaussian);
 
         // save them
         s.writeFields();
-    }
-
-    // Support for resetting seed while deserializing
-    private static final Unsafe unsafe = Unsafe.getUnsafe();
-    private static final long seedOffset;
-    static {
-        try {
-            seedOffset = unsafe.objectFieldOffset
-                    (Random.class.getDeclaredField("seed"));
-        } catch (Exception ex) { throw new Error(ex); }
-    }
-    private void resetSeed(long seedVal) {
-        unsafe.putReferenceVolatile(this, seedOffset, new AtomicLong(seedVal));
     }
 
     /**
