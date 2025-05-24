@@ -440,10 +440,15 @@ public class Random implements RandomGenerator, java.io.Serializable {
      */
     protected int next(int bits) {
         long oldseed, nextseed;
-        do {
+        while (true) {
             oldseed = (long) SEED_HANDLE.getAcquire(this);
             nextseed = (oldseed * multiplier + addend) & mask;
-        } while ((long) SEED_HANDLE.compareAndExchangeRelease(this, oldseed, nextseed) != oldseed);
+            if ((long) SEED_HANDLE.compareAndExchangeRelease(this, oldseed, nextseed) == oldseed) {
+                break;
+            } else {
+                Thread.onSpinWait();
+            }
+        }
         return (int)(nextseed >>> (48 - bits));
     }
 
