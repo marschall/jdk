@@ -30,6 +30,12 @@ import com.sun.tools.attach.spi.AttachProvider;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.Linker;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SymbolLookup;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandle;
 import java.net.SocketAddress;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
@@ -74,6 +80,8 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
     private static final Path ROOT_TMP = Path.of("root/tmp");
 
     private static final Set<PosixFilePermission> NOT_EXPECTED_PERMISSIONS = EnumSet.of(GROUP_READ, GROUP_WRITE, OTHERS_READ, OTHERS_WRITE);
+    
+    private static final int SIGQUIT = 3;
 
     Path socket_path;
     private SocketAddress socket_address;
@@ -311,7 +319,7 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
 
     private static final Pattern SIGNAL_MASK_PATTERN = Pattern.compile("(?<" + FIELD + ">Sig\\p{Alpha}{3}):\\s+(?<" + MASK + ">\\p{XDigit}{16}).*");
 
-    private static final long SIGQUIT = 0b100; // mask bit for SIGQUIT
+    private static final long SIGQUIT_MASK = 0b100; // mask bit for SIGQUIT
 
     private static boolean checkCatchesAndSendQuitTo(int pid, boolean throwIfNotReady) throws AttachNotSupportedException, IOException {
         var quitIgn = false;
@@ -340,7 +348,7 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
 
             sigmask = sigmask.substring(slen / 2 , slen); // only really interested in the non r/t signals ...
 
-            final var sigquit = (Long.valueOf(sigmask, 16) & SIGQUIT) != 0L;
+            final var sigquit = (Long.valueOf(sigmask, 16) & SIGQUIT_MASK) != 0L;
 
             switch (m.group(FIELD)) {
                 case "SigBlk": { quitBlk = sigquit; readBlk = true; break; }
@@ -408,12 +416,53 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         throw new IOException("well-known file " + pathSpec + " is not secure: " + message);
     }
 
-    //-- native methods
-
-    // ProcessHandle.of(pid).orElseThrow(() -> new IOException("kill")).destroy();
-    static native void sendQuitTo(int pid) throws IOException;
-
-    static {
-        System.loadLibrary("attach");
+    private static void sendQuitTo(int pid) throws IOException {
+        if (kill(pid, SIGQUIT) != 0) {
+            throw new IOException("kill");
+        }
     }
+
+    //-- FFM methods
+
+    static final SymbolLookup SYMBOL_LOOKUP = SymbolLookup.loaderLookup()
+            .or(Linker.nativeLinker().defaultLookup());
+
+    static MemorySegment findOrThrow(String symbol) {
+        return SYMBOL_LOOKUP.find(symbol)
+            .orElseThrow(() -> new UnsatisfiedLinkError("unresolved symbol: " + symbol));
+    }
+
+    public static final ValueLayout.OfInt C_INT = ValueLayout.JAVA_INT;
+    
+    private static class kill {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            VirtualMachineImpl.C_INT,
+            VirtualMachineImpl.C_INT,
+            VirtualMachineImpl.C_INT
+        );
+
+        public static final MemorySegment ADDR = VirtualMachineImpl.findOrThrow("kill");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+    
+
+    /**
+     * Calls kill(in, int) from signal.h.
+     * 
+     * <pre></code>
+     * #include <signal.h>
+     *
+     * int kill(pid_t pid, int sig);
+     * </code></pre>
+     */
+    public static int kill(int __pid, int __sig) {
+        var mh$ = kill.HANDLE;
+        try {
+            return (int) mh$.invokeExact(__pid, __sig);
+        } catch (Throwable ex$) {
+            throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
 }
