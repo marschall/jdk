@@ -32,6 +32,8 @@ import jdk.internal.misc.VM;
 import sun.nio.fs.UnixUserPrincipals;
 
 import java.io.InputStream;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
@@ -44,6 +46,22 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.EnumSet;
 import java.util.Set;
+
+import static java.lang.foreign.MemorySegment.NULL;
+
+import static sun.tools.attach.MacOs.CTL_KERN;
+import static sun.tools.attach.MacOs.C_CHAR;
+import static sun.tools.attach.MacOs.C_INT;
+import static sun.tools.attach.MacOs.KERN_PROC;
+import static sun.tools.attach.MacOs.KERN_PROC_PID;
+import static sun.tools.attach.MacOs.PATH_MAX;
+import static sun.tools.attach.MacOs.SIGQUIT;
+import static sun.tools.attach.MacOs._CS_DARWIN_USER_TEMP_DIR;
+import static sun.tools.attach.MacOs.confstr;
+import static sun.tools.attach.MacOs.kill;
+import static sun.tools.attach.MacOs.sigismember;
+import static sun.tools.attach.MacOs.size_t;
+
 import java.io.IOException;
 import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.PosixFileAttributes;
@@ -69,7 +87,8 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
     // This is intentionally not the same as java.io.tmpdir, since
     // the latter can be changed by the user.
     // Any changes to this needs to be synchronized with HotSpot.
-    private static final String tmpdir;
+    private static final Path tmpdir;
+    private static final boolean IS_MAC_OS = System.getProperty("os.name").equals("Mac OS X");
     Path socket_path;
     private UnixDomainSocketAddress socket_address;
     private OperationProperties props = new OperationProperties(VERSION_1); // updated in ctor
@@ -91,7 +110,7 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         // Find the socket file. If not found then we attempt to start the
         // attach mechanism in the target VM by sending it a QUIT signal.
         // Then we attempt to find the socket file again.
-        socket_path = Paths.get(tmpdir).resolve(".java_pid" + pid);
+        socket_path = tmpdir.resolve(".java_pid" + pid);
         if (!Files.exists(socket_path)) {
             Path f = createAttachFile(pid);
             try {
@@ -217,11 +236,11 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
     }
 
     private Path createAttachFile(int pid) throws IOException {
-        Path attachFile = Paths.get(tmpdir).resolve(".attach_pid" + pid);
+        Path attachFile = tmpdir.resolve(".attach_pid" + pid);
         Files.createFile(attachFile, PosixFilePermissions.asFileAttribute(Set.of(PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_READ)));
         return attachFile;
     }
-    
+
     private static void checkPermissions(Path path) throws IOException {
         UserPrincipal processUser = UnixUserPrincipals.fromUid((int) VM.geteuid());
         GroupPrincipal processGroup = UnixUserPrincipals.fromGid((int) VM.getegid());
@@ -254,14 +273,66 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
         throw new IOException("well-known file " + pathSpec + " is not secure: " + message);
     }
 
-    //-- native methods
+    private static boolean checkCatchesAndSendQuitTo(int pid, boolean throwIfNotReady) throws IOException, AttachNotSupportedException {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment mib = arena.allocateFrom(C_INT, CTL_KERN, KERN_PROC, KERN_PROC_PID, pid);
+            MemorySegment kiproc = arena.allocate(kinfo_proc.layout());
+            MemorySegment kipsz = arena.allocateFrom(size_t, kinfo_proc.sizeof());
 
-    static native boolean checkCatchesAndSendQuitTo(int pid, boolean throwIfNotReady) throws IOException, AttachNotSupportedException;
+            /*
+             * Early in the lifetime of a JVM it has not yet initialized its signal handlers, in particular the QUIT
+             * handler, note that the default behavior of QUIT is to terminate the receiving process, if unhandled.
+             *
+             * Since we use QUIT to initiate an attach operation, if we signal a JVM during this period early in its
+             * lifetime before it has initialized its QUIT handler, such a signal delivery will terminate the JVM we
+             * are attempting to attach to!
+             *
+             * The following code guards the QUIT delivery by testing the current signal masks. It is okay to send QUIT
+             * if the signal is caught but not ignored, as that implies a handler has been installed.
+             */
 
-    static native String getTempDir();
+            if (MacOs.sysctl(mib, (int) (mib.byteSize() / C_INT.byteSize()), kiproc, kipsz, NULL, 0) == 0) {
+                MemorySegment kp_proc = kinfo_proc.kp_proc(kiproc);
+                MemorySegment p_sigignore = kp_proc.asSlice(extern_proc.p_sigignore$offset(), extern_proc.p_sigignore$layout());
+                MemorySegment p_sigcatch = kp_proc.asSlice(extern_proc.p_sigcatch$offset(), extern_proc.p_sigcatch$layout());
+                boolean ignored = sigismember(p_sigignore, SIGQUIT) != 0;
+                boolean caught  = sigismember(p_sigcatch, SIGQUIT)  != 0;
+                // note: obviously the masks could change between testing and signalling however this is not the
+                // observed behavior of the current JVM implementation.
+
+                if (caught && !ignored) {
+                    if (kill(pid, SIGQUIT) != 0) {
+                        throw new IOException("kill");
+                    } else {
+                        return true;
+                    }
+                } else if (throwIfNotReady) {
+                    throw new AttachNotSupportedException("pid: " + pid + ", state is not ready to participate in attach handshake!");
+                }
+            } else {
+                throw new IOException("sysctl");
+            }
+
+            return false;
+        }
+    }
+
+    private static Path getTempDir() {
+        if (IS_MAC_OS) {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment buf = arena.allocate(C_CHAR, PATH_MAX);
+                long pathSize = confstr(_CS_DARWIN_USER_TEMP_DIR, buf, PATH_MAX);
+                if (pathSize != 0 || pathSize > PATH_MAX) {
+                    // native.encoding is UTF-8 on macOS
+                    // the string is NULL terminated
+                    return Paths.get(buf.getString(0));
+                }
+            }
+        }
+        return Paths.get("/tmp");
+    }
 
     static {
-        System.loadLibrary("attach");
         tmpdir = getTempDir();
     }
 }

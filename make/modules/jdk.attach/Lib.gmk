@@ -28,7 +28,7 @@
 include LibCommon.gmk
 
 
-ifeq ($(call isTargetOs, aix, macosx, windows), true)
+ifeq ($(call isTargetOs, aix, windows), true)
   ################################################################################
   ## Build libattach
   ################################################################################
