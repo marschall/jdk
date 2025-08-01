@@ -29,6 +29,7 @@ import com.sun.tools.attach.AttachNotSupportedException;
 import com.sun.tools.attach.spi.AttachProvider;
 
 import jdk.internal.misc.VM;
+import sun.nio.fs.UnixUserPrincipals;
 
 import java.io.InputStream;
 import java.net.StandardProtocolFamily;
@@ -41,20 +42,26 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.util.Map;
+import java.util.EnumSet;
 import java.util.Set;
 import java.io.IOException;
+import java.nio.file.attribute.GroupPrincipal;
+import java.nio.file.attribute.PosixFileAttributes;
+
+
+import java.nio.file.attribute.UserPrincipal;
+
+import static java.nio.file.attribute.PosixFilePermission.GROUP_READ;
+import static java.nio.file.attribute.PosixFilePermission.GROUP_WRITE;
+import static java.nio.file.attribute.PosixFilePermission.OTHERS_READ;
+import static java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE;
 
 /*
  * Bsd implementation of HotSpotVirtualMachine
  */
 @SuppressWarnings("restricted")
 public class VirtualMachineImpl extends HotSpotVirtualMachine {
-    private static final long ROOT_UID = 0L;
-    private static final int S_IRGRP = 0040;
-    private static final int S_IWGRP = 0020;
-    private static final int S_IROTH = 0004;
-    private static final int S_IWOTH = 002;
+    private static final Set<PosixFilePermission> NOT_EXPECTED_PERMISSIONS = EnumSet.of(GROUP_READ, GROUP_WRITE, OTHERS_READ, OTHERS_WRITE);
     // "tmpdir" is used as a global well-known location for the files
     // .java_pid<pid>. and .attach_pid<pid>. It is important that this
     // location is the same for all processes, otherwise the tools
@@ -216,18 +223,30 @@ public class VirtualMachineImpl extends HotSpotVirtualMachine {
     }
     
     private static void checkPermissions(Path path) throws IOException {
-        long processUid = VM.geteuid();
-        long processGid = VM.getegid();
-        Map<String, Object> attributes = Files.readAttributes(path, "unix:uid,gid,mode");
-        int fileUid = (int) attributes.get("uid");
-        int fileGid = (int) attributes.get("gid");
-        int mode = (int) attributes.get("mode");
-        if (fileUid != processUid && processUid != ROOT_UID) {
-            throwFileNotSecure(path, "file should be owned by the current user (which is " + processUid + ") but is owned by " + fileUid);
-        } else if (fileGid != processGid && processUid != ROOT_UID) {
-            throwFileNotSecure(path, "file's group should be the current group (which is " + processGid + ") but the group is " + fileGid);
-        } else if ((mode & (S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH)) != 0) {
-            throwFileNotSecure(path, "file should only be readable and writable by the owner but has " + String.format("0%03o", mode & 0777) + " access");
+        UserPrincipal processUser = UnixUserPrincipals.fromUid((int) VM.geteuid());
+        GroupPrincipal processGroup = UnixUserPrincipals.fromGid((int) VM.getegid());
+        
+        PosixFileAttributes attributes = Files.readAttributes(path, PosixFileAttributes.class);
+        UserPrincipal root = path.getFileSystem().getUserPrincipalLookupService() .lookupPrincipalByName("root");
+        boolean isRoot = root.equals(processUser);
+
+        Set<PosixFilePermission> permission = attributes.permissions();
+        UserPrincipal fileOwner = attributes.owner();
+        GroupPrincipal fileGroup = attributes.group();
+
+        if (!fileOwner.equals(processUser) && !isRoot) {
+            throwFileNotSecure(path,
+                "file should be owned by the current user (which is " + processUser + ") but is owned by " + fileOwner);
+        } else if (!fileGroup.equals(processGroup) && !isRoot) {
+            throwFileNotSecure(path,
+                "file's group should be the current group (which is " + fileGroup + ") but the group is " + processGroup);
+        } else if (!permission.isEmpty()) {
+            Set<PosixFilePermission> intersection = EnumSet.copyOf(permission);
+            intersection.retainAll(NOT_EXPECTED_PERMISSIONS);
+            if (!intersection.isEmpty()) {
+                throwFileNotSecure(path, "file should only be readable and writable by the owner but has "
+                    + PosixFilePermissions.toString( permission) + " access");
+            }
         }
     }
 
